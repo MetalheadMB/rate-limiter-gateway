@@ -1,0 +1,66 @@
+# Brings up: one Redis, two instances of the app, and an nginx gateway that
+# round-robins between them -- everything needed to see the shared rate
+# limit working for real, not simulated.
+#
+#   docker compose up --build
+#
+# Then hit the SINGLE entrypoint (nginx), not the app instances directly, so
+# your requests actually get load-balanced between app1 and app2:
+#
+#   curl -i http://localhost:8080/api/data
+#
+# Watch the X-Served-By header alternate between app1 and app2, and
+# X-RateLimit-Remaining count down continuously across both -- that's the
+# thing an in-memory Map cannot do, because each instance would otherwise
+# have its own separate counter. app1 and app2 are also reachable directly
+# on 3001/3002 if you want to prove the SAME shared count from either side:
+#
+#   curl -si http://localhost:3001/api/data | grep -i ratelimit-remaining
+#   curl -si http://localhost:3002/api/data | grep -i ratelimit-remaining
+#
+# See scripts/verify-redis-limiter.js for an automated version of this proof.
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  app1:
+    build: .
+    environment:
+      PORT: 3000
+      REDIS_URL: redis://redis:6379
+      INSTANCE_ID: app1
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "3001:3000" # direct access, for proving the shared count without going through nginx
+
+  app2:
+    build: .
+    environment:
+      PORT: 3000
+      REDIS_URL: redis://redis:6379
+      INSTANCE_ID: app2
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "3002:3000"
+
+  gateway:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "8080:80"
+    depends_on:
+      - app1
+      - app2
