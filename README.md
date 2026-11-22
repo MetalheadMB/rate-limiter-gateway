@@ -136,12 +136,9 @@ Builds the app image and starts Redis, two app instances (`app1`, `app2`), and a
 curl -i http://localhost:8080/api/data
 ```
 
-Run it a few times and watch `X-Served-By` alternate between `app1` and `app2` while `X-RateLimit-Remaining` counts down continuously — one shared quota, not two separate ones. Each instance is also reachable directly, to confirm the count is genuinely shared rather than coincidentally similar:
+Run it a few times and watch `X-Served-By` alternate between `app1` and `app2` while `X-RateLimit-Remaining` counts down continuously — one shared quota, not two separate ones. With in-memory counters, the remaining count would instead jump between two separate countdowns.
 
-```bash
-curl -si http://localhost:3001/api/data | grep -i ratelimit-remaining   # app1 direct
-curl -si http://localhost:3002/api/data | grep -i ratelimit-remaining   # app2 direct
-```
+The app instances are intentionally not published to the host: nginx is the only entrypoint, which is what makes trusting its `X-Forwarded-For` header safe (see [Configuration](#configuration)).
 
 `npm run docker:down` stops everything and removes the Redis volume.
 
@@ -178,23 +175,26 @@ curl -si http://localhost:3002/api/data | grep -i ratelimit-remaining   # app2 d
 | `REDIS_URL` | `redis://localhost:6379` | Where to find Redis |
 | `RATE_LIMIT_STRATEGY` | `redis-sliding` if `REDIS_URL` is set, else `memory-sliding` | `fixed` \| `memory-sliding` \| `redis-sliding` |
 | `INSTANCE_ID` | `local-<pid>` | Shown in `X-Served-By` and `/health`; set per-service in `docker-compose.yml` |
+| `TRUST_PROXY` | unset (trust nothing) | Express `trust proxy` value: a hop count (e.g. `1`) or a comma-separated list of proxy IPs/subnets. Set only when the app sits behind a proxy and is not directly reachable |
 
 ```bash
 RATE_LIMIT_STRATEGY=fixed npm run dev  # see the boundary-burst flaw for yourself
 ```
 
-The limit itself (10 requests / 60s) is set in `src/server.js`. `app.set('trust proxy', 1)` is enabled so `req.ip` resolves to the real client IP behind the nginx gateway (which sets `X-Forwarded-For`), and falls back to the direct connection IP with no proxy in front.
+The limit itself (10 requests / 60s) is set in `src/server.js`.
+
+**Client IP and `TRUST_PROXY`.** By default the app does *not* trust `X-Forwarded-For`, so `req.ip` is always the real TCP peer and a client can't fake its IP by sending that header. `docker-compose.yml` sets `TRUST_PROXY=1` on the app instances so they read the client IP that nginx appends — and the app instances are deliberately *not* published to the host, so nginx is the only way to reach them. Never set `TRUST_PROXY` on an instance clients can reach directly: with no proxy in front, anyone could send a fake `X-Forwarded-For` and get a fresh rate-limit bucket on every request.
 
 ## Design Decisions
 
 - **Fail-open, not fail-closed, when Redis is unreachable.** The limiter lets requests through rather than rejecting everything — turning a rate limiter's outage into the whole API's outage is a worse failure than briefly not rate limiting. Bypassed requests carry `X-RateLimit-Bypassed: redis-unavailable` so it's visible in logs, not silent. A stricter deployment (payments, an abuse-prone endpoint) might deliberately choose fail-closed instead.
 - **The Lua script asks Redis for the time (`TIME`) instead of using `Date.now()`.** If each instance trusted its own system clock, drift between servers would make one instance's eviction and reset math subtly disagree with another's. Asking Redis means every instance agrees on "now," by construction.
-- **No manual cleanup needed on the Redis side.** `PEXPIRE` is set on every accepted request, so Redis itself deletes a client's key one window after their last request. The in-memory version needed lazy pruning, a background sweep, *and* a hard cap to bound its memory — the Redis version gets that for free from the datastore's own TTL.
+- **No manual cleanup needed on the Redis side.** `PEXPIRE` is set on every accepted request, so Redis itself deletes a client's key one window after their last request. The in-memory version needs per-request pruning plus a periodic background sweep to bound its memory — the Redis version gets that for free from the datastore's own TTL.
 - **Rejected requests are never recorded.** Counting a `429` would let a client that keeps hammering push its own reset time forever into the future.
 
 ## Possible Next Steps
 
-- Per-API-key limits instead of per-IP (IP-based limiting breaks down behind NAT or a shared corporate egress IP — see the interview question list for the full tradeoff)
+- Per-API-key limits instead of per-IP (IP-based limiting breaks down behind NAT or a shared corporate egress IP)
 - A `/metrics` endpoint exposing current Redis key count and rejection rate
 - Switch to a sliding-window counter at very high request volumes, where per-client memory starts to matter
 - `npm ci` instead of `npm install` in the Dockerfile, and a non-root user in the image, for a more production-realistic build

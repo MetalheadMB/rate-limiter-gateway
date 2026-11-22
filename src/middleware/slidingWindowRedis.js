@@ -48,9 +48,9 @@
  * Redis's clock means every instance agrees on "now", by construction.
  *
  * TTL / MEMORY: `PEXPIRE` is set on every accepted request, so Redis itself
- * deletes a client's key windowMs after their last request -- the lazy
- * pruning / background sweep / hard cap machinery built for the in-memory
- * version (see slidingWindow.js's evolution) isn't needed here at all.
+ * deletes a client's key windowMs after their last request -- the
+ * per-request pruning and background sweep the in-memory version needs
+ * (see slidingWindow.js) aren't needed here at all.
  * Redis's own expiry does that job for free.
  */
 

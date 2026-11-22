@@ -12,11 +12,13 @@
 # Watch the X-Served-By header alternate between app1 and app2, and
 # X-RateLimit-Remaining count down continuously across both -- that's the
 # thing an in-memory Map cannot do, because each instance would otherwise
-# have its own separate counter. app1 and app2 are also reachable directly
-# on 3001/3002 if you want to prove the SAME shared count from either side:
+# have its own separate counter.
 #
-#   curl -si http://localhost:3001/api/data | grep -i ratelimit-remaining
-#   curl -si http://localhost:3002/api/data | grep -i ratelimit-remaining
+# app1 and app2 are deliberately NOT published to the host: nginx is the only
+# way in. That's what makes TRUST_PROXY=1 safe -- the apps trust the
+# X-Forwarded-For header, and only nginx can set it. If an app port were
+# published, a client could hit it directly with a fake X-Forwarded-For and
+# get a fresh rate-limit bucket on every request.
 #
 # See scripts/verify-redis-limiter.js for an automated version of this proof.
 
@@ -37,11 +39,10 @@ services:
       PORT: 3000
       REDIS_URL: redis://redis:6379
       INSTANCE_ID: app1
+      TRUST_PROXY: 1 # read the client IP nginx sets; safe only because this port isn't published
     depends_on:
       redis:
         condition: service_healthy
-    ports:
-      - "3001:3000" # direct access, for proving the shared count without going through nginx
 
   app2:
     build: .
@@ -49,11 +50,10 @@ services:
       PORT: 3000
       REDIS_URL: redis://redis:6379
       INSTANCE_ID: app2
+      TRUST_PROXY: 1
     depends_on:
       redis:
         condition: service_healthy
-    ports:
-      - "3002:3000"
 
   gateway:
     image: nginx:1.27-alpine

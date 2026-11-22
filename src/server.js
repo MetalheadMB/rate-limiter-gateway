@@ -9,14 +9,24 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const INSTANCE_ID = process.env.INSTANCE_ID || `local-${process.pid}`;
 
+// Client IP for per-IP limiting.
 // Behind the nginx gateway (docker-compose.yml), req.ip would otherwise be
-// nginx's own container IP, not the real client -- every request would look
-// like it came from the same "client", which breaks per-IP limiting. Trust
-// the X-Forwarded-For header nginx sets so req.ip is the real caller again.
-// Safe to enable unconditionally: with no proxy in front (plain `npm run
-// dev`), there's no X-Forwarded-For to trust and req.ip falls back to the
-// direct connection, same as before.
-app.set('trust proxy', 1);
+// nginx's own container IP -- every request would look like the same
+// "client". Trusting one proxy hop makes Express read the IP nginx appends
+// to X-Forwarded-For instead.
+//
+// But trust is OFF by default, on purpose: if the app is reachable directly
+// (plain `npm run dev`, or a published container port), a client can send
+// its own fake X-Forwarded-For header. With trust on, Express would believe
+// it, so every request could claim a new IP and get a fresh rate-limit
+// bucket -- a complete bypass. So TRUST_PROXY is set only in
+// docker-compose.yml, where the app instances are NOT published and nginx
+// is the only way in. Accepts a hop count ("1") or a comma-separated list of
+// trusted proxy IPs/subnets.
+const TRUST_PROXY = process.env.TRUST_PROXY;
+if (TRUST_PROXY) {
+  app.set('trust proxy', /^\d+$/.test(TRUST_PROXY) ? Number(TRUST_PROXY) : TRUST_PROXY);
+}
 
 // --- rate limit strategy selection -----------------------------------------
 // Three interchangeable middlewares, same interface, picked by env var so
